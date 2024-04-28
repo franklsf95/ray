@@ -183,6 +183,7 @@ class PhysicalOperator(Operator):
         self._metrics = OpRuntimeMetrics(self)
         self._estimated_output_blocks = None
         self._execution_completed = False
+        self._num_active_tasks_window = []
 
     def __reduce__(self):
         raise ValueError("Operator is not serializable.")

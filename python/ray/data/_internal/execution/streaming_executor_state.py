@@ -186,6 +186,9 @@ class OpState:
         # Used for StreamingExecutor to signal exception or end of execution
         self._finished: bool = False
         self._exception: Optional[Exception] = None
+        self.last_update_time = -1
+        self.start_time = time.time()
+        self.output_budget = -1
 
     def __repr__(self):
         return f"OpState({self.op.name})"
@@ -306,6 +309,82 @@ class OpState:
         else:
             self._exception = exception
 
+    def _get_average_ouput_size(self) -> float:
+        return self.op._metrics.average_bytes_outputs_per_task
+
+    def _get_grow_rate(self, resource_manager: ResourceManager) -> float:
+        cumulative_grow_rate = 0
+
+        # Assume no more than one output.
+        assert len(self.op.output_dependencies) <= 1
+        for op in self.op.output_dependencies:
+            logger.get_logger().info(
+                "@mzm: average_bytes_inputs_per_task "
+                f"{op._metrics.average_bytes_inputs_per_task}, "
+                f"average_task_duration: {op._metrics.average_task_duration}, "
+            )
+            # Initialize grow rate to be 0.
+            if (
+                not op._metrics.average_task_duration
+                or not op._metrics.average_bytes_inputs_per_task
+            ):
+                continue
+
+            cumulative_grow_rate += (
+                op._metrics.average_bytes_inputs_per_task
+                / op._metrics.average_task_duration
+                * (
+                    resource_manager.get_global_limits().cpu
+                    - self.op.num_active_tasks() * self.op.incremental_resource_usage().cpu
+                )
+            )
+
+        return cumulative_grow_rate
+
+    def _replenish_output_budget(self, resource_manager: ResourceManager) -> float:
+
+        # Initialize output_budget to object_store_memory.
+        INITIAL_BUDGET = resource_manager.get_global_limits().object_store_memory
+        if self.output_budget == -1:
+            self.output_budget = INITIAL_BUDGET
+            self.last_update_time = time.time()
+            return
+
+        grow_rate = self._get_grow_rate(resource_manager)
+        now = time.time()
+        time_elapsed = now - self.last_update_time
+
+        self.output_budget += time_elapsed * grow_rate
+        # Cap output_budget to object_store_memory
+        self.output_budget = min(INITIAL_BUDGET, self.output_budget)
+        logger.get_logger().info(
+            f"@mzm INITIAL_BUDGET: {INITIAL_BUDGET}, "
+            f"self.output_budget: {self.output_budget}, "
+            f"time elapsed: {time_elapsed} "
+            f"grow_rate: {grow_rate}"
+        )
+        self.last_update_time = now
+
+    def lsf_admission_control(self, resource_manager: ResourceManager) -> bool:
+
+        # TODO(MaoZiming)
+        if (self.op.name != "ReadRange->MapBatches(produce)" and self.op.name != "MapBatches(produce)"):
+            return True
+
+        INITIAL_BUDGET = resource_manager.get_global_limits().object_store_memory
+
+        self._replenish_output_budget(resource_manager)
+        output_size = self._get_average_ouput_size() or INITIAL_BUDGET
+
+        logger.get_logger().info(
+            f"@mzm output_budget: {self.output_budget}, output_size: {output_size}"
+        )
+
+        if output_size > self.output_budget:
+            return False
+        self.output_budget -= output_size
+        return True
+
 
 def build_streaming_topology(
     dag: PhysicalOperator, options: ExecutionOptions
@@ -381,7 +460,7 @@ def process_completed_tasks(
             active_tasks[task.get_waitable()] = (state, task)
 
     max_bytes_to_read_per_op: Dict[OpState, int] = {}
-    if resource_manager.op_resource_allocator_enabled():
+    if False and resource_manager.op_resource_allocator_enabled():  # @lsf
         for op, state in topology.items():
             max_bytes_to_read = (
                 resource_manager.op_resource_allocator.max_task_output_bytes_to_read(op)
@@ -518,7 +597,7 @@ def select_operator_to_run(
     # Filter to ops that are eligible for execution.
     ops = []
     for op, state in topology.items():
-        if resource_manager.op_resource_allocator_enabled():
+        if False and resource_manager.op_resource_allocator_enabled():  # @lsf
             under_resource_limits = (
                 resource_manager.op_resource_allocator.can_submit_new_task(op)
             )
@@ -532,6 +611,7 @@ def select_operator_to_run(
             and not op.completed()
             and state.num_queued() > 0
             and op.should_add_input()
+            and state.lsf_admission_control(resource_manager)
         ):
             ops.append(op)
         # Signal whether op in backpressure for stats collections
@@ -570,13 +650,18 @@ def select_operator_to_run(
 
     # Run metadata-only operators first. After that, choose the operator with the least
     # memory usage.
-    return min(
-        ops,
-        key=lambda op: (
-            not op.throttling_disabled(),
-            resource_manager.get_op_usage(op).object_store_memory,
-        ),
-    )
+    # op = min(
+    #     ops,
+    #     key=lambda op: (
+    #         not op.throttling_disabled(),
+    #         resource_manager.get_op_usage(op).object_store_memory,
+    #     ),
+    # )
+    op = ops[0]  # @lsf prefer the producer
+    # if op is not None:
+    # wall_time = time.time() - topology[op].start_time
+    # logger.get_logger().info(f"@lsf Selected: {op.name} @ {wall_time:.3f}")
+    return op
 
 
 def _try_to_scale_up_cluster(topology: Topology, execution_id: str):
@@ -642,7 +727,7 @@ def _execution_allowed(op: PhysicalOperator, resource_manager: ResourceManager) 
     Returns:
         Whether the op is allowed to run.
     """
-    if op.throttling_disabled():
+    if True and op.throttling_disabled():
         return True
 
     global_usage = resource_manager.get_global_usage()

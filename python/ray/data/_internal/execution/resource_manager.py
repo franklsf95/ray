@@ -38,12 +38,12 @@ class ResourceManager:
     # The fraction of the object store capacity that will be used as the default object
     # store memory limit for the streaming executor,
     # when `ReservationOpResourceAllocator` is enabled.
-    DEFAULT_OBJECT_STORE_MEMORY_LIMIT_FRACTION = 0.5
+    DEFAULT_OBJECT_STORE_MEMORY_LIMIT_FRACTION = 1  # @lsf
 
     # The fraction of the object store capacity that will be used as the default object
     # store memory limit for the streaming executor,
     # when `ReservationOpResourceAllocator` is not enabled.
-    DEFAULT_OBJECT_STORE_MEMORY_LIMIT_FRACTION_WO_RESOURCE_RESERVATION = 0.25
+    DEFAULT_OBJECT_STORE_MEMORY_LIMIT_FRACTION_WO_RESOURCE_RESERVATION = 1  # @lsf
 
     # Memory accounting is accurate only for these operators.
     # We'll enable memory reservation if a dataset only contains these operators.

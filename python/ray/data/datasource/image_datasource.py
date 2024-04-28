@@ -1,7 +1,7 @@
 import io
 import logging
 import time
-from typing import TYPE_CHECKING, Iterator, List, Optional, Tuple, Union, Callable
+from typing import TYPE_CHECKING, Callable, Iterator, List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -91,7 +91,8 @@ class ImageDatasource(FileBasedDatasource):
         if self.transform is not None:
             image = self.transform(image)
 
-        # @ronyw: Casting to `np.array` type here so we don't need to do it in the `collate_fn`
+        # @ronyw: Casting to `np.array` type here so we don't need to do it
+        # in the `collate_fn`
         array = np.array(image)
         item = {"image": array}
         yield item
